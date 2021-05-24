@@ -1,0 +1,337 @@
+---
+title: "ASSIGNMENT 1 – LINEAR LASSO ON “PUBLICATIONS”"
+author: "| Luigi Aceto"
+date: "`r format(Sys.Date(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: show
+    highlight: tango
+    keep_md: no
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_float: yes
+  github_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+Lasso regression is performed using the tidymodels framework.  
+
+```{r, message = FALSE, message = FALSE, warning = FALSE, include = FALSE, echo=FALSE}
+
+renv::restore()
+# renv::snapshot()
+knitr::opts_chunk$set(echo = FALSE, 
+                      include = FALSE,
+                      message = FALSE,
+                      warning = FALSE)
+
+library(tidyverse)
+library(dplyr)
+library(vip)
+library(tidymodels)
+library(gridExtra)
+library(foreign)
+library(kableExtra)
+```
+
+# data import
+
+eter_ita_school dataset is imported and rows containing NA are dropped.  
+
+```{r}
+data <- read.dta("./eter_ita_school.dta") %>%
+  dplyr::mutate(pub_cat = NULL) 
+
+data=na.omit(data)
+
+```
+
+
+```{r}
+my_hist_v2 <- function(data, variable, ...) {
+  name_var <- unique(data$vars)
+  data %>%
+    ggplot(data = ., mapping = aes(x = {{variable}})) +
+    geom_histogram() +
+    labs(x = name_var) +
+    # ggtitle(paste0("Histogram of ", name_var)) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+my_box_v2 <- function(data, variable, ...) {
+  name_var <- unique(data$vars)
+  data %>%
+    ggplot(data = ., mapping = aes(x = {{variable}})) +
+    ggplot2::geom_boxplot() +
+    labs(x = name_var) +
+    # ggtitle(paste0("Boxplot of ", name_var)) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+```
+
+# Dataviz histogram  
+
+```{r, include=TRUE}
+data %>% 
+  dplyr::select_if(., is.numeric) %>%
+  tidyr::pivot_longer(data = ., cols = c("pub":"feefund"), names_to = "vars", values_to = "value") %>%
+  plyr::dlply(.data = ., .variables = "vars") %>% 
+  purrr::map(.x = ., .f = ~my_hist_v2(.x, value)) %>%
+  marrangeGrob(., nrow=4, ncol=4)
+```
+
+It seems that some variables are not normalized.  
+
+# Dataviz boxplot  
+
+```{r, include=TRUE}
+data %>% 
+  dplyr::select_if(., is.numeric) %>%
+  tidyr::pivot_longer(data = ., cols = c("pub":"feefund"), names_to = "vars", values_to = "value") %>%
+  plyr::dlply(.data = ., .variables = "vars") %>% 
+  purrr::map(.x = ., .f = ~my_box_v2(.x, value)) %>%
+  marrangeGrob(., nrow=4, ncol=4)
+```
+
+# Modelling    
+
+totgradisced67, gdp, age, corefund and feefund are normalized before modelling.   
+50% of dataset is used in the training phase and the remaining part is used during the testing phase.  
+
+```{r}
+set.seed(1)
+data_split <- initial_split(data, strata = pub, prop = 0.5)
+data_train <- training(data_split)
+data_test <- testing(data_split)
+```
+
+```{r}
+data_rec <- recipe(pub ~ ., data = data_train) %>%
+  step_zv(all_numeric(), -all_outcomes()) %>%
+  step_normalize(totgradisced67, gdp, age, corefund, feefund)
+
+# to scale
+# c("totgradisced67", "gdp", "age", "corefund", "feefund")
+
+# data_prep <- data_rec %>%
+#   prep(strings_as_factors = FALSE)
+# 
+# summary(data_prep$)
+```
+
+```{r}
+# lasso_spec <- linear_reg(penalty = 0.001448, mixture = 1) %>%
+#   set_engine("glmnet")
+# 
+wf <- workflow() %>%
+  add_recipe(data_rec)
+# 
+# lasso_fit <- wf %>%
+#   add_model(lasso_spec) %>%
+#   fit(data = data_train)
+# 
+# lasso_fit %>%
+#   pull_workflow_fit() %>%
+#   tidy()
+```
+
+The penalty parameter was tuned using a 10-folds cross-validation.  
+
+```{r}
+set.seed(1234)
+# data_boot <- bootstraps(data_train, strata = pub)
+data_folds <- vfold_cv(data_train, strata = pub)
+
+tune_spec <- linear_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+options(scipen = 999)
+lambda_grid <- grid_regular(penalty(range = c(-4, -2)), levels = 100)
+# lambda_grid <- tibble(penalty = 10^seq(-2, 10, length.out = 100))
+# lambda_grid
+# lambda_grid <- tibble(penalty = 10^seq(10,-2,length=100))
+```
+The following metrics are collected from the cv:  
+
+- Root mean squared error (rmse)  
+- R squared (rsq)
+- Mean absolute error (mae)
+- Mean absolute percent error (mape)
+- Mean absolute scaled error (mase)
+
+
+```{r, include=TRUE}
+doParallel::registerDoParallel()
+
+# set.seed(2020)
+lasso_grid <- tune_grid(
+  wf %>% add_model(tune_spec),
+  resamples = data_folds,
+  metrics = metric_set(rmse, rsq, mae, mape, mase),
+  grid = lambda_grid
+)
+
+# lasso_grid %>%
+#   collect_metrics()
+```
+
+```{r, include=TRUE}
+lasso_grid %>%
+  collect_metrics() %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+```
+
+
+The best model is selected taking the rmse into account and the resulting penalty is showed below.  
+
+```{r, include=TRUE}
+lowest_rmse <- lasso_grid %>%
+  select_best("rmse")
+
+lowest_rmse %>%
+  kable(., align = "c") %>%
+  kable_styling(full_width = T)
+```
+# Optimal LASSO estimates  
+
+No zero LASSO estimates are showed in the following table.  
+
+```{r, include=TRUE}
+final_lasso <- finalize_workflow(
+  wf %>% add_model(tune_spec),
+  lowest_rmse
+)
+
+final_lasso %>%
+  fit(data_train) %>%
+  pull_workflow_fit() %>%
+  broom::tidy() %>%
+  dplyr::filter(estimate != 0) %>%
+  kable(., align = "c") %>%
+  kable_styling(full_width = T)
+```
+
+
+```{r}
+
+# final_lasso <- finalize_workflow(
+#   wf %>% add_model(tune_spec),
+#   lowest_rmse
+# )
+
+# lasso_grid %>%
+#   collect_metrics()
+```
+
+
+```{r}
+
+final_lasso %>%
+  fit(data_train) %>%
+  pull_workflow_fit() %>%
+  broom::tidy() %>%
+  dplyr::filter(estimate != 0) %>%
+  # vi(lambda = lowest_rmse$penalty) %>%
+  mutate(
+    Importance = abs(estimate),
+    Sign = if_else(estimate < 0, "NEG", "POS"),
+    Variable = fct_reorder(term, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+
+# final_lasso %>%
+#   fit(data_train) %>%
+#   pull_workflow_fit() %>%
+#   vi(lambda = lowest_rmse$penalty) %>%
+#   mutate(
+#     Importance = abs(Importance),
+#     Variable = fct_reorder(Variable, Importance)
+#   ) %>%
+#   ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+#   geom_col() +
+#   scale_x_continuous(expand = c(0, 0)) +
+#   labs(y = NULL)
+```
+
+# Predictions on test dataset  
+
+
+```{r, include=TRUE}
+last_fit(
+  final_lasso,
+  data_split
+) %>%
+  collect_metrics() %>%
+  kable(., align = "c") %>%
+  kable_styling(full_width = T)
+```
+
+```{r, include=TRUE}
+last_fit(
+  final_lasso,
+  data_split
+) %>%
+  collect_predictions() %>%
+  dplyr::mutate(se = (.pred - pub)^2) %>%
+  dplyr::summarise(mse = mean(se)) %>%
+  kable(., align = "c") %>%
+  kable_styling(full_width = T)
+
+```
+# Diagnostic plots  
+
+
+```{r, include=TRUE}
+last_fit(
+  final_lasso,
+  data_split
+) %>%
+  collect_predictions() %>%
+ggplot(data = .,
+       mapping = aes(x = .pred, y = pub)) +
+  geom_point(color = '#006EA1') +
+  geom_abline(intercept = 0, slope = 1, color = 'orange') +
+  labs(title = '',
+       x = 'Predicted values',
+       y = 'Actual values')
+
+
+
+```
+
+```{r, include=TRUE}
+last_fit(
+  final_lasso,
+  data_split
+) %>%
+  collect_predictions() %>%
+  dplyr::mutate(.resid = pub - .pred) %>%
+  ggplot(data = .,
+         mapping = aes(x = .pred, y = .resid)) +
+  geom_point(color = '#006EA1') +
+  geom_abline(intercept = 0, slope = 0, color = 'orange') +
+  labs(title = '',
+       x = 'Predicted values',
+       y = 'Residuals')
+
+```
+
+
+
+
+
